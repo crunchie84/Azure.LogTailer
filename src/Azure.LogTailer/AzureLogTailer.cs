@@ -22,6 +22,55 @@ namespace Azure.LogTailer
   public static class AzureLogTailer
   {
     /// <summary>
+    /// retrieve a list of blob uri prefixes to retrieve to minimize azure transactions
+    /// </summary>
+    /// <param name="iisApplicationPrefix"></param>
+    /// <param name="logsSinceModifiedDate"></param>
+    /// <returns></returns>
+    private static IEnumerable<string> getCloudContainerPrefixes(string iisApplicationPrefix, DateTimeOffset? logsSinceModifiedDate = null)
+    {
+      if (logsSinceModifiedDate.HasValue && logsSinceModifiedDate > DateTimeOffset.UtcNow.roundPrecision(TimeSpan.TicksPerHour))
+      {
+        //we only need the last hour
+        return new[]
+        {
+          String.Format(CultureInfo.InvariantCulture,
+            "{0}/{1}/{2:00}/{3:00}/{4:00}",
+            iisApplicationPrefix, logsSinceModifiedDate.Value.Year, logsSinceModifiedDate.Value.Month,
+            logsSinceModifiedDate.Value.Day, logsSinceModifiedDate.Value.Hour)
+        };
+      }
+
+      if (logsSinceModifiedDate.HasValue && logsSinceModifiedDate > DateTimeOffset.UtcNow.Date.AddDays(-7))
+      {
+        //we need the last 1 .. 7 days
+        return Enumerable.Range(0, 1 + (DateTimeOffset.UtcNow - logsSinceModifiedDate).Value.Days)
+          .Select(offset =>
+          {
+            var date = DateTime.Today.AddDays(offset*-1);
+            return String.Format(CultureInfo.InvariantCulture,
+              "{0}/{1}/{2:00}/{3:00}",
+              iisApplicationPrefix, date.Year, date.Month, date.Day);
+          });
+      }
+
+      //we need them all (or it is at least more efficient to page in memory
+      return new[] { iisApplicationPrefix };
+    }
+
+    /// <summary>
+    /// round the precision of the given datetimeoffset with the amount of <paramref name="roundTicks"/>
+    /// </summary>
+    /// <param name="date"></param>
+    /// <param name="roundTicks"></param>
+    /// <returns></returns>
+    static DateTimeOffset roundPrecision(this DateTimeOffset date, long roundTicks)
+    {
+      return date.Subtract(TimeSpan.FromTicks(date.Ticks % roundTicks));
+    }
+
+
+    /// <summary>
     /// Starts monitoring the given blobContainer for new or updated logfiles
     /// within the given <paramref name="iisApplicationPrefix"/>, optionally starts with 
     /// processing at the given <paramref name="skipUntilModifiedDate"/>
