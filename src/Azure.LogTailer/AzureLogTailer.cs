@@ -34,10 +34,9 @@ namespace Azure.LogTailer
         //we only need the last hour
         return new[]
         {
-          String.Format(CultureInfo.InvariantCulture,
-            "{0}/{1}/{2:00}/{3:00}/{4:00}",
-            iisApplicationPrefix, logsSinceModifiedDate.Value.Year, logsSinceModifiedDate.Value.Month,
-            logsSinceModifiedDate.Value.Day, logsSinceModifiedDate.Value.Hour)
+          String.Format(CultureInfo.InvariantCulture, "{0}/{1}",
+            iisApplicationPrefix, logsSinceModifiedDate.Value.ToString("yyyy/MM/dd/HH", CultureInfo.InvariantCulture)
+          )
         };
       }
 
@@ -48,9 +47,9 @@ namespace Azure.LogTailer
           .Select(offset =>
           {
             var date = DateTime.Today.AddDays(offset*-1);
-            return String.Format(CultureInfo.InvariantCulture,
-              "{0}/{1}/{2:00}/{3:00}",
-              iisApplicationPrefix, date.Year, date.Month, date.Day);
+            return String.Format(CultureInfo.InvariantCulture, "{0}/{1}",
+              iisApplicationPrefix, logsSinceModifiedDate.Value.ToString("yyyy/MM/dd", CultureInfo.InvariantCulture)
+            );
           });
       }
 
