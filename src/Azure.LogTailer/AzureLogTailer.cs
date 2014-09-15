@@ -3,22 +3,10 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Reactive.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using Microsoft.WindowsAzure.Storage.Blob;
 
 namespace Azure.LogTailer
 {
-  /// <summary>
-  /// The logical logfile tail event 'there are new bytes in this blob available to process'
-  /// </summary>
-  //public sealed class LogFileBlob
-  //{
-  //  public CloudBlockBlob BlockBlob { get; set; }
-  //  public long ByteOffsetAlreadyProcessed { get; set; }
-  //  public long TotalBytesAvailableInBlob { get; set; }
-  //}
-
   public static class AzureLogTailer
   {
     /// <summary>
@@ -27,28 +15,28 @@ namespace Azure.LogTailer
     /// <param name="iisApplicationPrefix"></param>
     /// <param name="logsSinceModifiedDate"></param>
     /// <returns></returns>
-    private static IEnumerable<string> getCloudContainerPrefixes(string iisApplicationPrefix, DateTimeOffset? logsSinceModifiedDate = null)
+    private static IEnumerable<string> getCloudContainerPrefixes(string iisApplicationPrefix, DateTimeOffset logsSinceModifiedDate)
     {
-      if (logsSinceModifiedDate.HasValue && logsSinceModifiedDate > DateTimeOffset.UtcNow.roundPrecision(TimeSpan.TicksPerHour))
+      if (logsSinceModifiedDate > DateTimeOffset.UtcNow.roundPrecision(TimeSpan.TicksPerHour))
       {
         //we only need the last hour
         return new[]
         {
           String.Format(CultureInfo.InvariantCulture, "{0}/{1}",
-            iisApplicationPrefix, logsSinceModifiedDate.Value.ToString("yyyy/MM/dd/HH", CultureInfo.InvariantCulture)
+            iisApplicationPrefix, logsSinceModifiedDate.ToString("yyyy/MM/dd/HH", CultureInfo.InvariantCulture)
           )
         };
       }
 
-      if (logsSinceModifiedDate.HasValue && logsSinceModifiedDate > DateTimeOffset.UtcNow.Date.AddDays(-7))
+      if (logsSinceModifiedDate > DateTimeOffset.UtcNow.Date.AddDays(-7))
       {
         //we need the last 1 .. 7 days
-        return Enumerable.Range(0, 1 + (DateTimeOffset.UtcNow - logsSinceModifiedDate).Value.Days)
+        return Enumerable.Range(0, 1 + (DateTimeOffset.UtcNow - logsSinceModifiedDate).Days)
           .Select(offset =>
           {
-            var date = DateTime.Today.AddDays(offset*-1);
+            var date = DateTimeOffset.UtcNow.Date.AddDays(offset * -1);
             return String.Format(CultureInfo.InvariantCulture, "{0}/{1}",
-              iisApplicationPrefix, logsSinceModifiedDate.Value.ToString("yyyy/MM/dd", CultureInfo.InvariantCulture)
+              iisApplicationPrefix, date.ToString("yyyy/MM/dd", CultureInfo.InvariantCulture)
             );
           });
       }
@@ -63,7 +51,7 @@ namespace Azure.LogTailer
     /// <param name="date"></param>
     /// <param name="roundTicks"></param>
     /// <returns></returns>
-    static DateTimeOffset roundPrecision(this DateTimeOffset date, long roundTicks)
+    private static DateTimeOffset roundPrecision(this DateTimeOffset date, long roundTicks)
     {
       return date.Subtract(TimeSpan.FromTicks(date.Ticks % roundTicks));
     }
@@ -88,50 +76,25 @@ namespace Azure.LogTailer
     {
       return Observable.Create<CloudBlockBlob>(observer =>
       {
+        //keep state of the modified dates we have seen
         var lastProcessedModifiedDate = skipUntilModifiedDate ?? DateTimeOffset.MinValue;
 
         // IIS logs are only published once every 30 seconds on Azure
-        var timerObservable = Observable.Timer(TimeSpan.FromSeconds(30)).Subscribe(timer =>
-        {
-          //find new logfiles and publish those to the observer.onNext
-          if (lastProcessedModifiedDate <= DateTimeOffset.MinValue)
-          {
-            //return all files currently available in the blobstore
-            // return all files in the container
-            logsBlobContainer.ListBlobs(iisApplicationPrefix, true)
+        var timerObservable = Observable.Timer(TimeSpan.FromSeconds(30)).Subscribe(_ =>
+          getCloudContainerPrefixes(iisApplicationPrefix, lastProcessedModifiedDate)
+            .Select(prefix => logsBlobContainer.ListBlobs(prefix, true)
               .OfType<CloudBlockBlob>()
-              .OrderBy(blob => blob.Properties.LastModified)
-              .ToObservable()
-              .Do(blob => lastProcessedModifiedDate = blob.Properties.LastModified ?? lastProcessedModifiedDate) //keep state of what we have seen
-              .Subscribe(observer);
-          }
-          else
-          {
-            // chunk the retrieval of files out of the blob container per day
-            //TODO we can improve this code greatly - the blobs are chunked into virtual directories yyyy/mm/dd/hh so we can optimize to only retrieve the last hour if modifieddate last hour
-            //TODO extract the listBlobs calls to a separate call so we can remove this if statement all together
-            var lastModifiedDay = lastProcessedModifiedDate.Date;
-            Enumerable.Range(0, 1 + (DateTime.Today - lastModifiedDay).Days)
-            .Select(offset =>
-            {
-              var date = DateTime.Today.AddDays(offset * -1);
-              var blobContainerPrefix = String.Format(CultureInfo.InvariantCulture,
-                "{0}/{1}/{2:00}/{3:00}",
-                iisApplicationPrefix, date.Year, date.Month, date.Day);
-
-              return logsBlobContainer
-                .ListBlobs(blobContainerPrefix, true)
-                .OfType<CloudBlockBlob>()
-                .Where(blob => blob.Properties.LastModified != null && blob.Properties.LastModified > lastProcessedModifiedDate)
-                .OrderBy(blob => blob.Properties.LastModified);
-            })
-            .SelectMany(date => date)
+              .Where(
+                blob => blob.Properties.LastModified != null && blob.Properties.LastModified > lastProcessedModifiedDate)
+            )
+            .SelectMany(blobs => blobs)
+            .OrderBy(blob => blob.Properties.LastModified)
             .ToObservable()
-            .Do(blob => lastProcessedModifiedDate = blob.Properties.LastModified ?? lastProcessedModifiedDate) //keep state of what we have seen
-            .Subscribe(observer);//TODO: does this onComplete the observer stream when the enumeration finishes first iteration?
-          }
-        });
+            .Do(blob => lastProcessedModifiedDate = blob.Properties.LastModified ?? lastProcessedModifiedDate)
+            .Subscribe(observer)
+          );
 
+        //TODO: does this onComplete the observer stream when the enumeration finishes first iteration?
         return timerObservable;//option to dispose the subscription
       });
     }
