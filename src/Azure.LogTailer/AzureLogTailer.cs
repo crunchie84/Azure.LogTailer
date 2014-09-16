@@ -96,7 +96,7 @@ namespace Azure.LogTailer
               .Subscribe(observer.OnNext, observer.OnError)
             );
 
-        return timerObservable;//option to dispose the subscription
+        return timerObservable;
       });
     }
   }
