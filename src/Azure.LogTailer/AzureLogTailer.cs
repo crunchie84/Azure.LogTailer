@@ -80,21 +80,22 @@ namespace Azure.LogTailer
         var lastProcessedModifiedDate = skipUntilModifiedDate ?? DateTimeOffset.MinValue;
 
         // IIS logs are only published once every 30 seconds on Azure
-        var timerObservable = Observable.Timer(TimeSpan.FromSeconds(30)).Subscribe(_ =>
-          getCloudContainerPrefixes(iisApplicationPrefix, lastProcessedModifiedDate)
-            .Select(prefix => logsBlobContainer.ListBlobs(prefix, true)
-              .OfType<CloudBlockBlob>()
-              .Where(
-                blob => blob.Properties.LastModified != null && blob.Properties.LastModified > lastProcessedModifiedDate)
-            )
-            .SelectMany(blobs => blobs)
-            .OrderBy(blob => blob.Properties.LastModified)
-            .ToObservable()
-            .Do(blob => lastProcessedModifiedDate = blob.Properties.LastModified ?? lastProcessedModifiedDate)
-            .Subscribe(observer)
-          );
+        var timerObservable = Observable.Timer(TimeSpan.FromSeconds(30))
+          .StartWith(-1L)//immediatly fire first event
+          .Subscribe(_ =>
+            getCloudContainerPrefixes(iisApplicationPrefix, lastProcessedModifiedDate)
+              .Select(prefix => logsBlobContainer.ListBlobs(prefix, true)
+                .OfType<CloudBlockBlob>()
+                .Where(
+                  blob => blob.Properties.LastModified != null && blob.Properties.LastModified > lastProcessedModifiedDate)
+              )
+              .SelectMany(blobs => blobs)
+              .OrderBy(blob => blob.Properties.LastModified)
+              .ToObservable()
+              .Do(blob => lastProcessedModifiedDate = blob.Properties.LastModified ?? lastProcessedModifiedDate)
+              .Subscribe(observer.OnNext, observer.OnError)
+            );
 
-        //TODO: does this onComplete the observer stream when the enumeration finishes first iteration?
         return timerObservable;//option to dispose the subscription
       });
     }
