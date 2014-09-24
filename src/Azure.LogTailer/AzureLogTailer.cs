@@ -5,7 +5,6 @@ using System.IO;
 using System.Linq;
 using System.Reactive.Linq;
 using Microsoft.WindowsAzure.Storage.Blob;
-using System.Reactive.Concurrency;
 
 namespace Azure.LogTailer
 {
@@ -29,8 +28,10 @@ namespace Azure.LogTailer
 			{
 				var bytesPerUriAlreadyProcessed = new Dictionary<string, long>();
 
-				var newOrModifiedLogFilesSubscription = GetNewOrModifiedIisLogFiles(logsBlobContainer, iisApplicationPrefix,
-					skipUntilModifiedDate)
+				var newOrModifiedLogFilesSubscription = GetNewOrModifiedIisLogFiles(logsBlobContainer, iisApplicationPrefix, skipUntilModifiedDate)
+#if DEBUG
+					.Do(logFile => Console.WriteLine("new or updated file: " + logFile.Uri))
+#endif
 					.Subscribe(newOrModifiedLogFile =>
 					{
 						// skip/seek the unprocessed parts
@@ -40,25 +41,33 @@ namespace Azure.LogTailer
 							: 0L;
 						var lengthToDownload = newOrModifiedLogFile.Properties.Length - bytesAlreadyProcessed;
 
+						//TODO this piece of code needs to be replaced with proper RX code but i didn't know the correct lingo
 						using (var memStream = new MemoryStream())
 						{
 							newOrModifiedLogFile.DownloadRangeToStream(memStream, bytesAlreadyProcessed, lengthToDownload);
-							//memStream.Position = 0;//rewind to first position
+							memStream.Position = 0;//rewind to first position
 
-							ReadLines(memStream)
-								.ToObservable(Scheduler.Default)
-								.Where(line => !line.StartsWith("#"))
-								.Select(line => line.Replace("~1", ""))
-								.Subscribe(observer.OnNext, observer.OnError);
-							//TODO does the async observer cause the memorystream to be disposed?
+							try
+							{
+								foreach (var logLine in readLines(memStream)
+									.Where(line => !line.StartsWith("#"))
+									.Select(line => line.Replace("~1", "")))
+								{
+									observer.OnNext(logLine);
+								}
+							}
+							catch (Exception e)
+							{
+								observer.OnError(e);
+							}
 						}
-					});
+					}, observer.OnError, observer.OnCompleted);
 
 				return newOrModifiedLogFilesSubscription;
 			});
 		}
 
-		private static IEnumerable<string> ReadLines(Stream stream)
+		private static IEnumerable<string> readLines(Stream stream)
 		{
 			using (var reader = new StreamReader(stream))
 			{
@@ -122,11 +131,11 @@ namespace Azure.LogTailer
 			{
 				//we only need the last hour
 				return new[]
-		{
-		  String.Format(CultureInfo.InvariantCulture, "{0}/{1}",
-			iisApplicationPrefix, logsSinceModifiedDate.ToString("yyyy/MM/dd/HH", CultureInfo.InvariantCulture)
-		  )
-		};
+				{
+					String.Format(CultureInfo.InvariantCulture, "{0}/{1}",
+						iisApplicationPrefix, logsSinceModifiedDate.ToString("yyyy/MM/dd/HH", CultureInfo.InvariantCulture)
+					)
+				};
 			}
 
 			if (logsSinceModifiedDate > DateTimeOffset.UtcNow.Date.AddDays(-7))
