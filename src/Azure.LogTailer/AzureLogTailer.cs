@@ -1,102 +1,217 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Reactive.Linq;
 using Microsoft.WindowsAzure.Storage.Blob;
 
 namespace Azure.LogTailer
 {
-  public static class AzureLogTailer
-  {
-    /// <summary>
-    /// Starts monitoring the given blobContainer for new or updated logfiles
-    /// within the given <paramref name="iisApplicationPrefix"/>, optionally starts with 
-    /// processing at the given <paramref name="skipUntilModifiedDate"/>
-    /// </summary>
-    /// <param name="logsBlobContainer">The blobcontainer in which the logfiles will reside</param>
-    /// <param name="iisApplicationPrefix">Within the blobcontainer the iisapp name will prefix the logfiles</param>
-    /// <param name="skipUntilModifiedDate">Logfiles with a modified date before the given date are ignored</param>
-    /// <returns>a stream of (logFile) Blobs which are created or updated</returns>
-    /// <remarks>
-    /// When subscribing to this observable it will keep state of which
-    /// blobs it has already emitted. It is the responsibility of the 
-    /// subscriber to persist this information so that upon a later 
-    /// subscription he has the information to pass a skipUntilModifiedDate
-    /// </remarks>
-    public static IObservable<CloudBlockBlob> GetNewOrModifiedIisLogFiles(CloudBlobContainer logsBlobContainer, string iisApplicationPrefix, DateTimeOffset? skipUntilModifiedDate = null)
-    {
-      return Observable.Create<CloudBlockBlob>(observer =>
-      {
-        //keep state of the modified dates we have seen
-        var lastProcessedModifiedDate = skipUntilModifiedDate ?? DateTimeOffset.MinValue;
+	public static class AzureLogTailer
+	{
 
-        // IIS logs are only published once every 30 seconds on Azure
-        var timerObservable = Observable.Timer(TimeSpan.FromSeconds(30))
-          .StartWith(-1L)//immediatly fire first event
-          .Subscribe(_ =>
-            getCloudContainerPrefixes(iisApplicationPrefix, lastProcessedModifiedDate)
-              .Select(prefix => logsBlobContainer.ListBlobs(prefix, true)
-                .OfType<CloudBlockBlob>()
-                .Where(
-                  blob => blob.Properties.LastModified != null && blob.Properties.LastModified > lastProcessedModifiedDate)
-              )
-              .SelectMany(blobs => blobs)
-              .OrderBy(blob => blob.Properties.LastModified)
-              .ToObservable()
-              .Do(blob => lastProcessedModifiedDate = blob.Properties.LastModified ?? lastProcessedModifiedDate)
-              .Subscribe(observer.OnNext, observer.OnError)
-            );
+		public static readonly string[] iisLogFields =
+			"date time s-sitename cs-method cs-uri-stem cs-uri-query s-port cs-username c-ip cs(User-Agent) cs(Cookie) cs(Referer) cs-host sc-status sc-substatus sc-win32-status sc-bytes cs-bytes time-taken"
+				.Split(' ')
+				.Select(f => f.Replace('(', '_').Replace(")", "").Replace('-', '_'))
+				.ToArray();
+		/// <summary>
+		/// parse the given iis logline and return it in json_event logstash compatible json
+		/// </summary>
+		/// <param name="iisLogLine"></param>
+		/// <returns></returns>
+		public static string ParseIisLogLineToJsonEvent(string iisLogLine)
+		{
+			//json_event format:
+			//{
+			//  "message"    => "hello world",
+			//  "@version"   => "1",
+			//  "@timestamp" => "2014-04-22T23:03:14.111Z",
+			//  "type"       => "stdin",
+			//  "host"       => "hello.local"
+			//}
+			//@timestamp is the ISO8601 high-precision timestamp for the event.
+			//@version is the version number of this json schema
+			// all other fields are free
+			
+			//iis log line format
+			//#Fields: date time s-sitename cs-method cs-uri-stem cs-uri-query s-port cs-username c-ip cs(User-Agent) cs(Cookie) cs(Referer) cs-host sc-status sc-substatus sc-win32-status sc-bytes cs-bytes time-taken
+			//index		0	1		2			3		4				5		6		7			8	9				10			11			12		13			14			15				16		17		18
+			var values = iisLogLine.Split(' ').ToArray();
 
-        return timerObservable;
-      });
-    }
+			var keyValuePairs = iisLogFields
+				.Skip(2) //skip the date and time
+				.Zip(
+					values
+						.Skip(2)
+						.Select(val => val.Replace(@"""", "'")),// escape some json-invalid stuff
+					(key, value) => String.Format(CultureInfo.InvariantCulture, @"""{0}"":""{1}""", key, value));
 
-    /// <summary>
-    /// retrieve a list of blob uri prefixes to retrieve to minimize azure transactions
-    /// </summary>
-    /// <param name="iisApplicationPrefix"></param>
-    /// <param name="logsSinceModifiedDate"></param>
-    /// <returns></returns>
-    private static IEnumerable<string> getCloudContainerPrefixes(string iisApplicationPrefix, DateTimeOffset logsSinceModifiedDate)
-    {
-        if (logsSinceModifiedDate > DateTimeOffset.UtcNow.roundPrecision(TimeSpan.TicksPerHour))
-        {
-            //we only need the last hour
-            return new[]
-        {
-          String.Format(CultureInfo.InvariantCulture, "{0}/{1}",
-            iisApplicationPrefix, logsSinceModifiedDate.ToString("yyyy/MM/dd/HH", CultureInfo.InvariantCulture)
-          )
-        };
-        }
+			//2014-09-10 02:54:41
+			var timestamp = DateTime.ParseExact(values[0] +" "+ values[1], "yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal);
 
-        if (logsSinceModifiedDate > DateTimeOffset.UtcNow.Date.AddDays(-7))
-        {
-            //we need the last 1 .. 7 days
-            return Enumerable.Range(0, 1 + (DateTimeOffset.UtcNow - logsSinceModifiedDate).Days)
-              .Select(offset =>
-              {
-                  var date = DateTimeOffset.UtcNow.Date.AddDays(offset * -1);
-                  return String.Format(CultureInfo.InvariantCulture, "{0}/{1}",
-                    iisApplicationPrefix, date.ToString("yyyy/MM/dd", CultureInfo.InvariantCulture)
-                  );
-              });
-        }
+			return string.Format(CultureInfo.InvariantCulture,
+				@"{{""@version"":1, ""@timestamp"":""{0}"",""type"":""iis"",{1}}}", 
+					timestamp.ToString("yyyy-MM-ddTHH:mm:ssK"),
+					String.Join(",", keyValuePairs)
+				);
+		}
 
-        //we need them all (or it is at least more efficient to page in memory
-        return new[] { iisApplicationPrefix };
-    }
+		/// <summary>
+		/// Returns an observable stream of loglines to process 
+		/// based on the given stream of newOrModifiedIisLogFiles.
+		/// </summary>
+		/// <param name="logsBlobContainer">The blobcontainer in which the logfiles will reside</param>
+		/// <param name="iisApplicationPrefix">Within the blobcontainer the iisapp name will prefix the logfiles</param>
+		/// <param name="skipUntilModifiedDate">Logfiles with a modified date before the given date are ignored</param>
+		/// <returns></returns>
+		/// <remarks>
+		/// Keeps state in itself to know which loglines are already
+		/// emitted to the observers.
+		/// </remarks>
+		public static IObservable<string> GetUnprocessedIisLoglines(CloudBlobContainer logsBlobContainer, string iisApplicationPrefix, DateTimeOffset? skipUntilModifiedDate = null)
+		{
+			return Observable.Create<string>(observer =>
+			{
+				var bytesPerUriAlreadyProcessed = new Dictionary<string, long>();
 
-    /// <summary>
-    /// round the precision of the given datetimeoffset with the amount of <paramref name="roundTicks"/>
-    /// </summary>
-    /// <param name="date"></param>
-    /// <param name="roundTicks"></param>
-    /// <returns></returns>
-    private static DateTimeOffset roundPrecision(this DateTimeOffset date, long roundTicks)
-    {
-        return date.Subtract(TimeSpan.FromTicks(date.Ticks % roundTicks));
-    }
-  }
+				var newOrModifiedLogFilesSubscription = GetNewOrModifiedIisLogFiles(logsBlobContainer, iisApplicationPrefix, skipUntilModifiedDate)
+#if DEBUG
+.Do(logFile => Console.WriteLine("new or updated file: " + logFile.Uri))
+#endif
+.Subscribe(newOrModifiedLogFile =>
+					{
+						// skip/seek the unprocessed parts
+						var blobUrl = newOrModifiedLogFile.Uri.ToString();
+						var bytesAlreadyProcessed = bytesPerUriAlreadyProcessed.ContainsKey(blobUrl)
+							? bytesPerUriAlreadyProcessed[blobUrl]
+							: 0L;
+						var lengthToDownload = newOrModifiedLogFile.Properties.Length - bytesAlreadyProcessed;
+
+						//TODO this piece of code needs to be replaced with proper RX code but i didn't know the correct lingo
+						using (var memStream = new MemoryStream())
+						{
+							newOrModifiedLogFile.DownloadRangeToStream(memStream, bytesAlreadyProcessed, lengthToDownload);
+							memStream.Position = 0;//rewind to first position
+
+							try
+							{
+								foreach (var logLine in readLines(memStream)
+									.Where(line => !line.StartsWith("#"))
+									.Select(line => line.Replace("~1", "")))
+								{
+									observer.OnNext(logLine);
+								}
+							}
+							catch (Exception e)
+							{
+								observer.OnError(e);
+							}
+						}
+					}, observer.OnError, observer.OnCompleted);
+
+				return newOrModifiedLogFilesSubscription;
+			});
+		}
+
+		private static IEnumerable<string> readLines(Stream stream)
+		{
+			using (var reader = new StreamReader(stream))
+			{
+				while (!reader.EndOfStream)
+					yield return reader.ReadLine();
+			}
+		}
+
+		/// <summary>
+		/// Starts monitoring the given blobContainer for new or updated logfiles
+		/// within the given <paramref name="iisApplicationPrefix"/>, optionally starts with 
+		/// processing at the given <paramref name="skipUntilModifiedDate"/>
+		/// </summary>
+		/// <param name="logsBlobContainer">The blobcontainer in which the logfiles will reside</param>
+		/// <param name="iisApplicationPrefix">Within the blobcontainer the iisapp name will prefix the logfiles</param>
+		/// <param name="skipUntilModifiedDate">Logfiles with a modified date before the given date are ignored</param>
+		/// <returns>a stream of (logFile) Blobs which are created or updated</returns>
+		/// <remarks>
+		/// When subscribing to this observable it will keep state of which
+		/// blobs it has already emitted. It is the responsibility of the 
+		/// subscriber to persist this information so that upon a later 
+		/// subscription he has the information to pass a skipUntilModifiedDate
+		/// </remarks>
+		public static IObservable<CloudBlockBlob> GetNewOrModifiedIisLogFiles(CloudBlobContainer logsBlobContainer, string iisApplicationPrefix, DateTimeOffset? skipUntilModifiedDate = null)
+		{
+			return Observable.Create<CloudBlockBlob>(observer =>
+			{
+				//keep state of the modified dates we have seen
+				var lastProcessedModifiedDate = skipUntilModifiedDate ?? DateTimeOffset.MinValue;
+
+				// IIS logs are only published once every 30 seconds on Azure
+				var timerObservable = Observable.Timer(TimeSpan.FromSeconds(30))
+				  .StartWith(-1L)//immediatly fire first event
+				  .Subscribe(_ =>
+					getCloudContainerPrefixes(iisApplicationPrefix, lastProcessedModifiedDate)
+					  .Select(prefix => logsBlobContainer.ListBlobs(prefix, true)
+						.OfType<CloudBlockBlob>()
+						.Where(
+						  blob => blob.Properties.LastModified != null && blob.Properties.LastModified > lastProcessedModifiedDate)
+					  )
+					  .SelectMany(blobs => blobs)
+					  .OrderBy(blob => blob.Properties.LastModified)
+					  .ToObservable()
+					  .Do(blob => lastProcessedModifiedDate = blob.Properties.LastModified ?? lastProcessedModifiedDate)
+					  .Subscribe(observer.OnNext, observer.OnError)
+					);
+
+				return timerObservable;
+			});
+		}
+
+		/// <summary>
+		/// retrieve a list of blob uri prefixes to retrieve to minimize azure transactions
+		/// </summary>
+		/// <param name="iisApplicationPrefix"></param>
+		/// <param name="logsSinceModifiedDate"></param>
+		/// <returns></returns>
+		private static IEnumerable<string> getCloudContainerPrefixes(string iisApplicationPrefix, DateTimeOffset logsSinceModifiedDate)
+		{
+			if (logsSinceModifiedDate > DateTimeOffset.UtcNow.roundPrecision(TimeSpan.TicksPerHour))
+			{
+				//we only need the last hour
+				return new[]
+				{
+					String.Format(CultureInfo.InvariantCulture, "{0}/{1}",
+						iisApplicationPrefix, logsSinceModifiedDate.ToString("yyyy/MM/dd/HH", CultureInfo.InvariantCulture)
+					)
+				};
+			}
+
+			if (logsSinceModifiedDate > DateTimeOffset.UtcNow.Date.AddDays(-7))
+			{
+				//we need the last 1 .. 7 days
+				return Enumerable.Range(0, 1 + (DateTimeOffset.UtcNow - logsSinceModifiedDate).Days)
+				  .Select(offset =>
+				  {
+					  var date = DateTimeOffset.UtcNow.Date.AddDays(offset * -1);
+					  return String.Format(CultureInfo.InvariantCulture, "{0}/{1}",
+						iisApplicationPrefix, date.ToString("yyyy/MM/dd", CultureInfo.InvariantCulture)
+					  );
+				  });
+			}
+
+			//we need them all (or it is at least more efficient to page in memory
+			return new[] { iisApplicationPrefix };
+		}
+
+		/// <summary>
+		/// round the precision of the given datetimeoffset with the amount of <paramref name="roundTicks"/>
+		/// </summary>
+		/// <param name="date"></param>
+		/// <param name="roundTicks"></param>
+		/// <returns></returns>
+		private static DateTimeOffset roundPrecision(this DateTimeOffset date, long roundTicks)
+		{
+			return date.Subtract(TimeSpan.FromTicks(date.Ticks % roundTicks));
+		}
+	}
 }
