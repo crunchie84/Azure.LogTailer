@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Reactive.Concurrency;
 using System.Reactive.Linq;
 using Microsoft.WindowsAzure.Storage.Blob;
 
@@ -14,7 +15,7 @@ namespace Azure.LogTailer
 		public static readonly string[] iisLogFields =
 			"date time s-sitename cs-method cs-uri-stem cs-uri-query s-port cs-username c-ip cs(User-Agent) cs(Cookie) cs(Referer) cs-host sc-status sc-substatus sc-win32-status sc-bytes cs-bytes time-taken"
 				.Split(' ')
-				.Select(f => f.Replace('(', '_').Replace(")", "").Replace('-', '_'))
+				.Select(f => f.Replace('(', '_').Replace(")", "").Replace('-', '_'))//remove/replace json-incompatible chars
 				.ToArray();
 		/// <summary>
 		/// parse the given iis logline and return it in json_event logstash compatible json
@@ -37,16 +38,23 @@ namespace Azure.LogTailer
 			
 			//iis log line format
 			//#Fields: date time s-sitename cs-method cs-uri-stem cs-uri-query s-port cs-username c-ip cs(User-Agent) cs(Cookie) cs(Referer) cs-host sc-status sc-substatus sc-win32-status sc-bytes cs-bytes time-taken
-			//index		0	1		2			3		4				5		6		7			8	9				10			11			12		13			14			15				16		17		18
+			//index		  0	    1		  2			3		4				5		6		7			8	9				10			11			12		13			14			15				16		17		18
 			var values = iisLogLine.Split(' ').ToArray();
 
-			var keyValuePairs = iisLogFields
-				.Skip(2) //skip the date and time
-				.Zip(
-					values
-						.Skip(2)
-						.Select(val => val.Replace(@"""", "'")),// escape some json-invalid stuff
-					(key, value) => String.Format(CultureInfo.InvariantCulture, @"""{0}"":""{1}""", key, value));
+      //string values
+		  var keyValuePairs = iisLogFields
+		    .Skip(2) //skip the date and time
+		    .Select((value, index) => new {index, field = value})
+		    .Zip(
+		      values
+		        .Skip(2)
+		        .Select(val => val.Replace(@"""", "'")), // escape some json-invalid stuff
+		      (keyTuple, value) =>
+		      {
+		        if (keyTuple.index > 10 || keyTuple.index == 4)//zero based index 4 = port, all above 10 = bytes/response times etc
+		          return String.Format(CultureInfo.InvariantCulture, @"""{0}"":{1}", keyTuple.field, value);//int values
+		        return String.Format(CultureInfo.InvariantCulture, @"""{0}"":""{1}""", keyTuple.field, value);//string values
+		      });
 
 			//2014-09-10 02:54:41
 			var timestamp = DateTime.ParseExact(values[0] +" "+ values[1], "yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal);
@@ -72,15 +80,15 @@ namespace Azure.LogTailer
 		/// </remarks>
 		public static IObservable<string> GetUnprocessedIisLoglines(CloudBlobContainer logsBlobContainer, string iisApplicationPrefix, DateTimeOffset? skipUntilModifiedDate = null)
 		{
-			return Observable.Create<string>(observer =>
-			{
-				var bytesPerUriAlreadyProcessed = new Dictionary<string, long>();
+			var bytesPerUriAlreadyProcessed = new Dictionary<string, long>();
 
-				var newOrModifiedLogFilesSubscription = GetNewOrModifiedIisLogFiles(logsBlobContainer, iisApplicationPrefix, skipUntilModifiedDate)
-#if DEBUG
-.Do(logFile => Console.WriteLine("new or updated file: " + logFile.Uri))
-#endif
-.Subscribe(newOrModifiedLogFile =>
+			return GetNewOrModifiedIisLogFiles(logsBlobContainer, iisApplicationPrefix, skipUntilModifiedDate)
+	#if DEBUG
+				//.Do(logFile => Console.WriteLine("new or updated file: " + logFile.Uri))
+				.Do(_ => Console.Write("X"))
+	#endif
+				.Select(newOrModifiedLogFile => Observable.Using(
+					() =>
 					{
 						// skip/seek the unprocessed parts
 						var blobUrl = newOrModifiedLogFile.Uri.ToString();
@@ -89,29 +97,38 @@ namespace Azure.LogTailer
 							: 0L;
 						var lengthToDownload = newOrModifiedLogFile.Properties.Length - bytesAlreadyProcessed;
 
-						//TODO this piece of code needs to be replaced with proper RX code but i didn't know the correct lingo
-						using (var memStream = new MemoryStream())
-						{
-							newOrModifiedLogFile.DownloadRangeToStream(memStream, bytesAlreadyProcessed, lengthToDownload);
-							memStream.Position = 0;//rewind to first position
+						var memStream = new MemoryStream();
+						// TODO does the using also dispose this memorystream when done with the StreamReader?
+						newOrModifiedLogFile.DownloadRangeToStream(memStream, bytesAlreadyProcessed, lengthToDownload);
+						memStream.Position = 0; //rewind to first position
+						return new StreamReader(memStream);
+					},
+					streamReader => readLinesFromStream(streamReader)
+						.Where(line => !line.StartsWith("#"))
+						.Select(line => line.Replace("~1", ""))
+					))
+ 				.SelectMany(l => l);
+		}
 
-							try
-							{
-								foreach (var logLine in readLines(memStream)
-									.Where(line => !line.StartsWith("#"))
-									.Select(line => line.Replace("~1", "")))
-								{
-									observer.OnNext(logLine);
-								}
-							}
-							catch (Exception e)
-							{
-								observer.OnError(e);
-							}
-						}
-					}, observer.OnError, observer.OnCompleted);
+    //public static IObservable<byte> ToObservable(this MemoryStream source, 
+    //  int buffersize, 
+    //  IScheduler scheduler)
+    //  {
+    //  var bytes = Observable.Create<byte>(o =>
+    //  {
+    //    //...
+    //  });
+    //  return Observable.Using(() => source, _ => bytes);
+    //}
 
-				return newOrModifiedLogFilesSubscription;
+		private static IObservable<string> readLinesFromStream(StreamReader stream)
+		{
+			return Observable.Create<string>(observer =>
+			{
+				while (!stream.EndOfStream)
+					observer.OnNext(stream.ReadLine());
+
+				return stream;
 			});
 		}
 
