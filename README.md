@@ -12,8 +12,10 @@ The Console application will start searching for (IIS) logfiles within the confi
 
 # Compiling it yourself
 
-- Visual Studio 2014
+- Visual Studio 2013
 - NuGet Package Restore FTW
+
+The repository also contains an .editorconfig file which helps to maintain consistent tabs vs spaces & line endings. You can install the [Visual Studio plugin](http://visualstudiogallery.msdn.microsoft.com/c8bccfe2-650c-4b42-bc5c-845e21f96328) which will detect this file and automatically update your editor settings.
 
 
 # Costs
