@@ -72,10 +72,10 @@ namespace Azure.LogTailer
 			var bytesPerUriAlreadyProcessed = new Dictionary<string, long>();
 
 			return GetNewOrModifiedLogFiles(logsBlobContainer, iisApplicationPrefix, skipUntilModifiedDate)
-#if DEBUG
-.Do(logFile => Console.WriteLine("new or updated file: " + logFile.Uri))
-#endif
-.Select(newOrModifiedLogFile => Observable.Using(
+				#if DEBUG
+				.Do(logFile => Console.WriteLine("new or updated file: " + logFile.Uri))
+				#endif
+				.Select(newOrModifiedLogFile => Observable.Using(
 					() =>
 					{
 						// skip/seek the unprocessed parts
