@@ -1,0 +1,4 @@
+﻿{
+    /* http://blogs.msdn.com/b/waws/archive/2014/05/19/how-to-run-a-continuous-webjob-as-a-singleton.aspx */
+    "is_singleton": true
+}
