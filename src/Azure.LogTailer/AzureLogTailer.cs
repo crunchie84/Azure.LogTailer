@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Reactive.Concurrency;
 using System.Reactive.Linq;
 using Microsoft.WindowsAzure.Storage.Blob;
 
@@ -92,8 +91,8 @@ namespace Azure.LogTailer
 						return new StreamReader(memStream);
 					},
 					streamReader => readLinesFromStream(streamReader)
-						.Where(line => !line.StartsWith("#"))
-						.Select(line => line.Replace("~1", ""))
+						.Where(line => !line.StartsWith("#") && !String.IsNullOrWhiteSpace(line)) // skip comment & empty lines
+						.Select(line => line.Replace("~1", "")) // remove weird characters in some lines
 					))
 				.SelectMany(l => l);
 		}
