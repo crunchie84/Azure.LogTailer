@@ -139,7 +139,7 @@ namespace Azure.LogTailer
 				var lastProcessedModifiedDate = skipUntilModifiedDate ?? DateTimeOffset.MinValue;
 
 				// IIS logs are only published once every 30 seconds on Azure
-				var timerObservable = Observable.Timer(TimeSpan.FromSeconds(30))
+				var timerObservable = Observable.Interval(TimeSpan.FromSeconds(30))
 					.StartWith(-1L)//immediatly fire first event
 					.Subscribe(_ =>
 					getCloudContainerPrefixes(applicationPrefix, lastProcessedModifiedDate)
@@ -162,20 +162,20 @@ namespace Azure.LogTailer
 		/// <summary>
 		/// retrieve a list of blob uri prefixes to retrieve to minimize azure transactions
 		/// </summary>
-		/// <param name="appliationPrefix">Can be the IIS app or application_logs prefix</param>
+		/// <param name="applicationPrefix">Can be the IIS app or application_logs prefix</param>
 		/// <param name="logsSinceModifiedDate"></param>
 		/// <returns></returns>
-		private static IEnumerable<string> getCloudContainerPrefixes(string appliationPrefix, DateTimeOffset logsSinceModifiedDate)
+		private static IEnumerable<string> getCloudContainerPrefixes(string applicationPrefix, DateTimeOffset logsSinceModifiedDate)
 		{
 			if (logsSinceModifiedDate > DateTimeOffset.UtcNow.roundPrecision(TimeSpan.TicksPerHour))
 			{
 				//we only need the last hour
 				return new[]
-        {
-          String.Format(CultureInfo.InvariantCulture, "{0}/{1}",
-            appliationPrefix, logsSinceModifiedDate.ToString("yyyy/MM/dd/HH", CultureInfo.InvariantCulture)
-          )
-        };
+					{
+					  String.Format(CultureInfo.InvariantCulture, "{0}/{1}",
+						applicationPrefix, logsSinceModifiedDate.ToString("yyyy/MM/dd/HH", CultureInfo.InvariantCulture)
+					  )
+					};
 			}
 
 			if (logsSinceModifiedDate > DateTimeOffset.UtcNow.Date.AddDays(-7))
@@ -186,13 +186,13 @@ namespace Azure.LogTailer
 					{
 						var date = DateTimeOffset.UtcNow.Date.AddDays(offset * -1);
 						return String.Format(CultureInfo.InvariantCulture, "{0}/{1}",
-						appliationPrefix, date.ToString("yyyy/MM/dd", CultureInfo.InvariantCulture)
+						applicationPrefix, date.ToString("yyyy/MM/dd", CultureInfo.InvariantCulture)
 						);
 					});
 			}
 
 			//we need them all (or it is at least more efficient to page in memory
-			return new[] { appliationPrefix };
+			return new[] { applicationPrefix };
 		}
 
 		/// <summary>
