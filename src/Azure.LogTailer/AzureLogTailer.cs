@@ -8,6 +8,9 @@ using Microsoft.WindowsAzure.Storage.Blob;
 
 namespace Azure.LogTailer
 {
+	/// <summary>
+	/// This class contains logic for streaming new or modified blob files to json objects
+	/// </summary>
 	public static class AzureLogTailer
 	{
 		/// <summary>
@@ -68,7 +71,7 @@ namespace Azure.LogTailer
 		/// </remarks>
 		public static IObservable<string> GetUnprocessedIisLoglines(CloudBlobContainer logsBlobContainer, string iisApplicationPrefix, DateTimeOffset? skipUntilModifiedDate = null)
 		{
-			var bytesPerUriAlreadyProcessed = new Dictionary<string, long>();
+			var bytesPerUriAlreadyProcessed = new Dictionary<string, LogFileMetadata>();
 
 			return GetNewOrModifiedLogFiles(logsBlobContainer, iisApplicationPrefix, skipUntilModifiedDate)
 				#if DEBUG
@@ -80,9 +83,16 @@ namespace Azure.LogTailer
 						// skip/seek the unprocessed parts
 						var blobUrl = newOrModifiedLogFile.Uri.ToString();
 						var bytesAlreadyProcessed = bytesPerUriAlreadyProcessed.ContainsKey(blobUrl)
-							? bytesPerUriAlreadyProcessed[blobUrl]
+							? bytesPerUriAlreadyProcessed[blobUrl].ContentLengthProcessed
 							: 0L;
 						var lengthToDownload = newOrModifiedLogFile.Properties.Length - bytesAlreadyProcessed;
+
+						//store that we have processed this part
+						bytesPerUriAlreadyProcessed[blobUrl] = new LogFileMetadata
+						{
+							ContentLengthProcessed = newOrModifiedLogFile.Properties.Length,
+							LastModified = newOrModifiedLogFile.Properties.LastModified
+						};
 
 						var memStream = new MemoryStream();
 						// TODO does the using also dispose this memorystream when done with the StreamReader?
@@ -204,5 +214,12 @@ namespace Azure.LogTailer
 		{
 			return date.Subtract(TimeSpan.FromTicks(date.Ticks % roundTicks));
 		}
+
+		class LogFileMetadata
+		{
+			public DateTimeOffset? LastModified { get; set; }
+			public long ContentLengthProcessed { get; set; }
+		}
+
 	}
 }
