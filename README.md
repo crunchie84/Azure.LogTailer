@@ -2,6 +2,20 @@
 
 Library for tailing your IIS &amp; Application logs being written to the Azure blobstore
 
+# Usage
+
+Due to the close integration of Azure WebJobs with Azure Websites this repository will result in a Console application which can run as a continuous running Azure WebJob. It does not actually use much of the webjob SDK but the wrapping of the console application.
+
+# How does it work
+
+The Console application will start searching for (IIS) logfiles within the configured blobcontainer. All logfiles which are not processed yet are emitted as json messages to the configured redis cache so you can further process those with logstash. When the Console application has emitted the loglines it will store those in a blob next to the IIS logs so it can auto-resume when it has been stopped.
+
+# Compiling it yourself
+
+- Visual Studio 2014
+- NuGet Package Restore FTW
+
+
 # Costs
 
 This library will poll the blobstore for changes thus use transactions. I have counted the following behaviour:
